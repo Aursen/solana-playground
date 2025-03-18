@@ -1,27 +1,16 @@
-#![allow(dead_code, deprecated)]
-
-#[macro_use]
-extern crate serde_derive;
-
+#[allow(clippy::result_large_err)]
 mod client;
-mod constants;
 mod error;
-mod methods;
 mod provider;
-mod request;
-mod response;
+mod types;
 
 #[cfg(feature = "pubsub")]
 mod pubsub;
 
-pub mod utils;
-
-// Export sdk for stand-alone use of wasm client without specifying sdk as dependency
-pub use solana_sdk;
-
 // For root level imports
 pub use {
-    client::WasmClient, error::ClientError, request::ClientRequest, response::ClientResponse,
+    client::WasmClient, error::Error as ClientError, error::ErrorKind as ClientErrorKind,
+    solana_rpc_client_api::request::RpcRequest as ClientRequest, types::*,
 };
 
-pub type ClientResult<T> = std::result::Result<T, error::ClientError>;
+pub type ClientResult<T> = Result<T, ClientError>;

@@ -1,86 +1,161 @@
-use std::pin::pin;
+use reqwest::{
+    header::{self, CONTENT_TYPE, RETRY_AFTER},
+    StatusCode,
+};
+use serde_json::Value;
+use solana_rpc_client_api::{
+    custom_error,
+    error_object::RpcErrorObject,
+    request::{RpcError, RpcRequest, RpcResponseErrorData},
+    response::RpcSimulateTransactionResult,
+};
+use std::{
+    sync::atomic::{AtomicU64, Ordering},
+    time::Duration,
+};
+use tokio::time::sleep;
 
-use futures::future::{select, Either};
-use gloo_net::http::{Method as HttpMethod, RequestBuilder};
-use gloo_timers::future::TimeoutFuture;
-use http::StatusCode;
-use serde::de::DeserializeOwned;
-use web_sys::{wasm_bindgen::UnwrapThrowExt, AbortController};
+use crate::ClientResult;
 
-use crate::{methods::Method, ClientError, ClientRequest, ClientResponse, ClientResult};
-
-#[derive(Clone)]
 pub struct HttpProvider {
+    client: reqwest::Client,
     url: String,
-    timeout: u32,
+    request_id: AtomicU64,
 }
 
 impl HttpProvider {
     pub fn new(url: impl ToString) -> Self {
+        Self::new_with_timeout(url, Duration::from_secs(30))
+    }
+
+    pub fn new_with_timeout(url: impl ToString, timeout: Duration) -> Self {
         Self {
+            client: reqwest::Client::builder()
+                .default_headers(Self::default_headers())
+                .timeout(timeout)
+                .pool_idle_timeout(timeout)
+                .build()
+                .expect("invalid rpc client"),
             url: url.to_string(),
-            timeout: 60000,
+            request_id: AtomicU64::new(0),
         }
     }
 
-    pub fn new_with_timeout(url: impl ToString, timeout: u32) -> Self {
-        Self {
-            url: url.to_string(),
-            timeout,
-        }
+    pub fn url(&self) -> &str {
+        &self.url
+    }
+
+    pub fn default_headers() -> header::HeaderMap {
+        let mut default_headers = header::HeaderMap::new();
+        default_headers.append(
+            header::HeaderName::from_static("solana-client"),
+            header::HeaderValue::from_str(
+                format!("rust/{}", solana_version::Version::default()).as_str(),
+            )
+            .unwrap(),
+        );
+        default_headers
     }
 }
 
 impl HttpProvider {
-    pub async fn send<T: Method, R: DeserializeOwned>(
-        &self,
-        request: &T,
-    ) -> ClientResult<ClientResponse<R>> {
-        let client_request = ClientRequest::new(T::NAME).id(0).params(request);
+    pub async fn send(&self, request: RpcRequest, params: Value) -> ClientResult<Value> {
+        let request_id = self.request_id.fetch_add(1, Ordering::Relaxed);
+        let request_json = request.build_request_json(request_id, params).to_string();
 
-        let ctrl = AbortController::new().unwrap_throw();
-        let timeout_fut = TimeoutFuture::new(self.timeout);
-        let req_fut = RequestBuilder::new(&self.url)
-            .method(HttpMethod::POST)
-            .abort_signal(Some(&ctrl.signal()))
-            .json(&client_request)?
-            .send();
+        let mut too_many_requests_retries = 5;
+        loop {
+            let response = {
+                let client = self.client.clone();
+                let request_json = request_json.clone();
+                client
+                    .post(&self.url)
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(request_json)
+                    .send()
+                    .await
+            }?;
 
-        let fut = match select(timeout_fut, pin!(req_fut)).await {
-            Either::Left((_, fut)) => {
-                ctrl.abort();
-                fut.await
+            if !response.status().is_success() {
+                if response.status() == StatusCode::TOO_MANY_REQUESTS
+                    && too_many_requests_retries > 0
+                {
+                    let mut duration = Duration::from_millis(500);
+                    if let Some(retry_after) = response.headers().get(RETRY_AFTER) {
+                        if let Ok(retry_after) = retry_after.to_str() {
+                            if let Ok(retry_after) = retry_after.parse::<u64>() {
+                                if retry_after < 120 {
+                                    duration = Duration::from_secs(retry_after);
+                                }
+                            }
+                        }
+                    }
+
+                    too_many_requests_retries -= 1;
+                    sleep(duration).await;
+                    continue;
+                }
+                return Err(response.error_for_status().unwrap_err().into());
             }
-            Either::Right((val, fut)) => {
-                drop(fut);
-                val
+
+            let mut json = response.json::<Value>().await?;
+            if json["error"].is_object() {
+                return match serde_json::from_value::<RpcErrorObject>(json["error"].clone()) {
+                    Ok(rpc_error_object) => {
+                        let data = match rpc_error_object.code {
+                                    custom_error::JSON_RPC_SERVER_ERROR_SEND_TRANSACTION_PREFLIGHT_FAILURE => {
+                                        match serde_json::from_value::<RpcSimulateTransactionResult>(json["error"]["data"].clone()) {
+                                            Ok(data) => RpcResponseErrorData::SendTransactionPreflightFailure(data),
+                                            Err(_) => {
+                                                RpcResponseErrorData::Empty
+                                            }
+                                        }
+                                    },
+                                    custom_error::JSON_RPC_SERVER_ERROR_NODE_UNHEALTHY => {
+                                        match serde_json::from_value::<custom_error::NodeUnhealthyErrorData>(json["error"]["data"].clone()) {
+                                            Ok(custom_error::NodeUnhealthyErrorData {num_slots_behind}) => RpcResponseErrorData::NodeUnhealthy {num_slots_behind},
+                                            Err(_err) => {
+                                                RpcResponseErrorData::Empty
+                                            }
+                                        }
+                                    },
+                                    _ => RpcResponseErrorData::Empty
+                                };
+
+                        Err(RpcError::RpcResponseError {
+                            code: rpc_error_object.code,
+                            message: rpc_error_object.message,
+                            data,
+                        }
+                        .into())
+                    }
+                    Err(err) => Err(RpcError::RpcRequestError(format!(
+                        "Failed to deserialize RPC error response: {} [{}]",
+                        serde_json::to_string(&json["error"]).unwrap(),
+                        err
+                    ))
+                    .into()),
+                };
             }
-        };
-
-        let response = fut?;
-        let status =
-            StatusCode::from_u16(response.status()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
-
-        if status.is_success() {
-            if let Ok(response) = response.json::<ClientResponse<R>>().await {
-                return Ok(response);
-            }
-        }
-
-        match response.json::<ClientError>().await {
-            Ok(error) => Err(error),
-            Err(error) => Err(ClientError::new_with_status(status.as_u16(), error)),
+            return Ok(json["result"].take());
         }
     }
 }
 
-#[derive(Clone)]
 pub enum Provider {
     Http(HttpProvider),
 }
 
 impl Provider {
-    pub fn new(url: &str) -> Self {
-        Self::Http(HttpProvider::new(url))
+    pub fn url(&self) -> &str {
+        match self {
+            Provider::Http(http_provider) => http_provider.url(),
+        }
+    }
+
+    pub async fn send(&self, request: RpcRequest, params: Value) -> ClientResult<Value> {
+        match self {
+            Provider::Http(http_provider) => http_provider.send(request, params).await,
+        }
     }
 }

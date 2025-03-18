@@ -1,76 +1,170 @@
-use http::StatusCode;
-use std::fmt;
+pub use reqwest;
+use solana_rpc_client_api::{request, response};
+use {
+    solana_transaction_error::{TransactionError, TransportError},
+    std::io,
+    thiserror::Error as ThisError,
+};
 
-#[derive(Debug, Serialize, Deserialize)]
-struct Error {
-    code: u16,
-    message: String,
+#[derive(ThisError, Debug)]
+pub enum ErrorKind {
+    #[error(transparent)]
+    Io(#[from] io::Error),
+    #[error(transparent)]
+    Reqwest(#[from] reqwest::Error),
+    #[error(transparent)]
+    RpcError(#[from] request::RpcError),
+    #[error(transparent)]
+    SerdeJson(#[from] serde_json::error::Error),
+    #[error(transparent)]
+    TransactionError(#[from] TransactionError),
+    #[error("Custom: {0}")]
+    Custom(String),
 }
 
-impl Default for Error {
-    fn default() -> Self {
+impl ErrorKind {
+    pub fn get_transaction_error(&self) -> Option<TransactionError> {
+        match self {
+            Self::RpcError(request::RpcError::RpcResponseError {
+                data:
+                    request::RpcResponseErrorData::SendTransactionPreflightFailure(
+                        response::RpcSimulateTransactionResult {
+                            err: Some(tx_err), ..
+                        },
+                    ),
+                ..
+            }) => Some(tx_err.clone()),
+            Self::TransactionError(tx_err) => Some(tx_err.clone()),
+            _ => None,
+        }
+    }
+}
+
+impl From<TransportError> for ErrorKind {
+    fn from(err: TransportError) -> Self {
+        match err {
+            TransportError::IoError(err) => Self::Io(err),
+            TransportError::TransactionError(err) => Self::TransactionError(err),
+            TransportError::Custom(err) => Self::Custom(err),
+        }
+    }
+}
+
+impl From<ErrorKind> for TransportError {
+    fn from(client_error_kind: ErrorKind) -> Self {
+        match client_error_kind {
+            ErrorKind::Io(err) => Self::IoError(err),
+            ErrorKind::TransactionError(err) => Self::TransactionError(err),
+            ErrorKind::Reqwest(err) => Self::Custom(format!("{err:?}")),
+            ErrorKind::RpcError(err) => Self::Custom(format!("{err:?}")),
+            ErrorKind::SerdeJson(err) => Self::Custom(format!("{err:?}")),
+            ErrorKind::Custom(err) => Self::Custom(format!("{err:?}")),
+        }
+    }
+}
+
+#[derive(ThisError, Debug)]
+#[error("{kind}")]
+pub struct Error {
+    pub request: Option<request::RpcRequest>,
+
+    #[source]
+    pub kind: ErrorKind,
+}
+
+impl Error {
+    pub fn new_with_request(kind: ErrorKind, request: request::RpcRequest) -> Self {
         Self {
-            code: StatusCode::INTERNAL_SERVER_ERROR.as_u16(),
-            message: StatusCode::INTERNAL_SERVER_ERROR.as_str().to_owned(),
+            request: Some(request),
+            kind,
         }
     }
-}
 
-#[derive(Debug, Serialize, Deserialize)]
-pub struct ClientError {
-    id: u16,
-    jsonrpc: String,
-    error: Error,
-}
-
-impl std::error::Error for ClientError {}
-
-impl Default for ClientError {
-    fn default() -> Self {
+    pub fn into_with_request(self, request: request::RpcRequest) -> Self {
         Self {
-            id: 0,
-            jsonrpc: String::from("2.0"),
-            error: Error::default(),
+            request: Some(request),
+            ..self
+        }
+    }
+
+    pub fn request(&self) -> Option<&request::RpcRequest> {
+        self.request.as_ref()
+    }
+
+    pub fn kind(&self) -> &ErrorKind {
+        &self.kind
+    }
+
+    pub fn get_transaction_error(&self) -> Option<TransactionError> {
+        self.kind.get_transaction_error()
+    }
+}
+
+impl From<ErrorKind> for Error {
+    fn from(kind: ErrorKind) -> Self {
+        Self {
+            request: None,
+            kind,
         }
     }
 }
 
-impl From<gloo_net::Error> for ClientError {
-    fn from(error: gloo_net::Error) -> Self {
-        ClientError {
-            error: Error {
-                code: StatusCode::INTERNAL_SERVER_ERROR.into(),
-                message: error.to_string(),
-            },
-            ..Default::default()
+impl From<TransportError> for Error {
+    fn from(err: TransportError) -> Self {
+        Self {
+            request: None,
+            kind: err.into(),
         }
     }
 }
 
-impl ClientError {
-    pub fn new(error_msg: impl ToString) -> Self {
-        ClientError {
-            error: Error {
-                code: StatusCode::SEE_OTHER.as_u16(),
-                message: error_msg.to_string(),
-            },
-            ..Default::default()
-        }
+impl From<Error> for TransportError {
+    fn from(client_error: Error) -> Self {
+        client_error.kind.into()
     }
+}
 
-    pub fn new_with_status(code: u16, error_msg: impl ToString) -> Self {
-        ClientError {
-            error: Error {
-                code,
-                message: error_msg.to_string(),
-            },
-            ..Default::default()
+impl From<std::io::Error> for Error {
+    fn from(err: std::io::Error) -> Self {
+        Self {
+            request: None,
+            kind: err.into(),
         }
     }
 }
 
-impl fmt::Display for ClientError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(format!("Client error: {}", self.error.message).as_str())
+impl From<reqwest::Error> for Error {
+    fn from(err: reqwest::Error) -> Self {
+        Self {
+            request: None,
+            kind: err.into(),
+        }
+    }
+}
+
+impl From<request::RpcError> for Error {
+    fn from(err: request::RpcError) -> Self {
+        Self {
+            request: None,
+            kind: err.into(),
+        }
+    }
+}
+
+impl From<serde_json::error::Error> for Error {
+    fn from(err: serde_json::error::Error) -> Self {
+        Self {
+            request: None,
+            kind: err.into(),
+        }
+    }
+}
+
+impl From<TransactionError> for Error {
+    fn from(err: TransactionError) -> Self {
+        Self {
+            request: None,
+            kind: err.into(),
+        }
     }
 }

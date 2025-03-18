@@ -1,6 +1,6 @@
 [package]
 name = "solana-client-wasm"
-version = "1.18.0" # mirror solana-sdk version
+version = "2.2.3" # mirror solana-sdk version
 description = "Solana non-blocking WASM RPC client."
 authors = ["Acheron <acheroncrypto@gmail.com>"]
 repository = "https://github.com/solana-playground/solana-playground"
@@ -14,24 +14,33 @@ readme = "README.md"
 pubsub = ["web-sys/MessageEvent", "web-sys/WebSocket", "wasm-bindgen", "wasm-bindgen-futures"]
 
 [dependencies]
-base64 = "0.13"
+base64 = "0.22"
 bincode = "1.3"
-bs58 = "0.4"
+bs58 = "0.5"
 futures = "0.3"
-gloo-net = "0.6"
-gloo-timers = { version = "0.3", features = ["futures"] }
-http = "1.0"
+reqwest = { version = "0.12", features = ["json"] }
 serde = "1"
-serde_derive = "1"
-serde_json = "1"
-serde_tuple = "0.5"
-serde_with = "3.9"
-solana-extra-wasm = { path = "../utils/solana-extra", version = "=1.18.0" }
-solana-sdk = "~1.18"
-thiserror = "1"
-wasm-bindgen = { version = "0.2.88", optional = true }
-wasm-bindgen-futures = { version = "0.4.38", optional = true }
-web-sys = { version = "0.3.65", features = ["AbortController", "MessageEvent", "WebSocket"] }
+serde_json = "1.0"
+solana-account = "2.2"
+solana-account-decoder-client-types = "2.2"
+solana-clock = "2.2"
+solana-commitment-config = "2.2"
+solana-epoch-info = { version = "2.2", features = ["serde"] }
+solana-epoch-schedule = {version = "2.2", features = ["serde"] }
+solana-hash = "2.2"
+solana-message = "2.2"
+solana-pubkey = "2.2"
+solana-rpc-client-api = "2.2"
+solana-signature = "2.2"
+solana-transaction = {version = "2.2", features = ["bincode"] }
+solana-transaction-error = "2.2"
+solana-transaction-status-client-types = "2.2"
+solana-version = "2.2"
+thiserror = "2.0"
+wasm-bindgen = { version = "0.2", optional = true }
+wasm-bindgen-futures = { version = "0.4", optional = true }
+web-sys = { version = "0.3", features = ["AbortController", "MessageEvent", "WebSocket"] }
+tokio = { version = "1.44", features = ["time"]}
 
 [dev-dependencies]
 wasm-bindgen-test = "0.3.38"
